@@ -1,9 +1,12 @@
 #!/bin/bash
-# Test runner for shunt evals: hook routing decisions + token savings benchmarks
+# Test runner for shunt evals: hook routing decisions, worker transport, and
+# token savings benchmarks.
+#
+# Modified from spotify/portal-ai-plugins plugins/shunt (Apache-2.0).
 #
 # Usage:
-#   bash evals/run.sh              # hooks only (no Portal access needed)
-#   bash evals/run.sh --benchmark  # hooks + token savings (requires portal-cli auth)
+#   bash evals/run.sh              # hooks + transport (stubbed claude, no real calls)
+#   bash evals/run.sh --benchmark  # also token savings (real claude -p calls, costs usage)
 #   bash evals/run.sh --all        # every eval suite
 
 set -euo pipefail
@@ -18,6 +21,10 @@ TOTAL=0
 RUN_HOOKS=true
 RUN_BENCHMARK=false
 
+# The evals set these per case; values inherited from the caller's shell would
+# skew every result.
+unset SHUNT_DISABLED SHUNT_WORKER SHUNT_MIN_LINES CLAUDE_PLUGIN_ROOT
+
 for arg in "$@"; do
   case "$arg" in
     --benchmark) RUN_BENCHMARK=true ;;
@@ -25,13 +32,22 @@ for arg in "$@"; do
   esac
 done
 
+# kind: text (default), png (NUL bytes after a PNG signature), pdf (a %PDF-
+# header over plain text lines, no NUL bytes), binary (NUL bytes, no name hint)
 generate_fixture() {
-  local path="$1" lines="$2"
-  if [ "$lines" -eq 0 ]; then
-    touch "$path"
-  else
-    seq 1 "$lines" | awk '{print "line "NR}' > "$path"
-  fi
+  local path="$1" lines="$2" kind="${3:-text}"
+  case "$kind" in
+    png)    { printf '\211PNG\r\n\032\n\000\000\000\015IHDR\n'; seq 1 "$lines" | awk '{print "line "NR}'; } > "$path" ;;
+    pdf)    { printf '%%PDF-1.7\n'; seq 1 "$lines" | awk '{print "line "NR}'; } > "$path" ;;
+    binary) { printf 'BLOB\000\001\002\n'; seq 1 "$lines" | awk '{print "line "NR}'; } > "$path" ;;
+    *)
+      if [ "$lines" -eq 0 ]; then
+        touch "$path"
+      else
+        seq 1 "$lines" | awk '{print "line "NR}' > "$path"
+      fi
+      ;;
+  esac
 }
 
 setup_fixtures() {
@@ -47,8 +63,9 @@ setup_fixtures() {
     fixture=$(jq -r ".evals[$i].fixture" "$evals_file")
     [ "$fixture" = "null" ] && continue
 
-    local lines
+    local lines kind
     lines=$(jq -r ".evals[$i].fixture.lines" "$evals_file")
+    kind=$(jq -r ".evals[$i].fixture.kind // \"text\"" "$evals_file")
 
     local input_path
     input_path=$(jq -r ".evals[$i].input.tool_input.file_path // empty" "$evals_file")
@@ -62,32 +79,68 @@ setup_fixtures() {
     # in the working directory; the fixtures those evals rely on are created by
     # their siblings anyway.
     case "$input_path" in
-      "$FIXTURES"/*) generate_fixture "$input_path" "$lines" ;;
+      "$FIXTURES"/*) generate_fixture "$input_path" "$lines" "$kind" ;;
     esac
   done
 }
 
+substitute() {
+  sed -e "s|{{FIXTURES}}|$FIXTURES|g" -e "s|{{PLUGIN_ROOT}}|$PLUGIN_DIR|g"
+}
+
+# Decision as Claude Code would see it:
+#   allow  the hook printed nothing and exited 0 (no opinion: the normal
+#          permission flow decides, nothing is auto-approved)
+#   block  one PreToolUse object with permissionDecision "deny" and a reason
+# Anything else (legacy {"decision": ...} output, a non-zero exit, stray text)
+# is reported as invalid, because Claude Code would show it as a hook error.
 run_eval() {
-  local hook="$1" name="$2" input="$3" expected="$4" reason="$5" env_json="$6"
+  local hook="$1" name="$2" input="$3" expected="$4" reason="$5" env_json="$6" contains_json="$7"
   TOTAL=$((TOTAL + 1))
 
-  local result actual
+  local result rc=0 actual detail=""
   if [ -n "$env_json" ] && [ "$env_json" != "null" ]; then
     local env_cmd=""
     while IFS='=' read -r key val; do
       env_cmd="$env_cmd $key=$val"
     done < <(echo "$env_json" | jq -r 'to_entries[] | "\(.key)=\(.value)"')
-    result=$(echo "$input" | env $env_cmd bash "$hook" 2>/dev/null)
+    # shellcheck disable=SC2086
+    result=$(printf '%s' "$input" | env $env_cmd bash "$hook" 2>/dev/null) || rc=$?
   else
-    result=$(echo "$input" | bash "$hook" 2>/dev/null)
+    result=$(printf '%s' "$input" | bash "$hook" 2>/dev/null) || rc=$?
   fi
-  actual=$(echo "$result" | jq -r '.decision')
+
+  if [ "$rc" -ne 0 ]; then
+    actual="exit-$rc"
+  elif [ -z "$result" ]; then
+    actual="allow"
+  elif printf '%s' "$result" | jq -e '
+      (keys == ["hookSpecificOutput"])
+      and .hookSpecificOutput.hookEventName == "PreToolUse"
+      and .hookSpecificOutput.permissionDecision == "deny"
+      and (.hookSpecificOutput.permissionDecisionReason | type == "string" and length > 0)
+    ' >/dev/null 2>&1; then
+    actual="block"
+  else
+    actual="invalid-output"
+  fi
+
+  if [ "$actual" = "block" ] && [ -n "$contains_json" ] && [ "$contains_json" != "null" ]; then
+    local hook_reason needle
+    hook_reason=$(printf '%s' "$result" | jq -r '.hookSpecificOutput.permissionDecisionReason')
+    while IFS= read -r needle; do
+      case "$hook_reason" in
+        *"$needle"*) ;;
+        *) actual="block-without-hint"; detail=" missing=[$needle]" ;;
+      esac
+    done < <(printf '%s' "$contains_json" | jq -r '.[]')
+  fi
 
   if [ "$actual" = "$expected" ]; then
     printf "  \033[32mPASS\033[0m  %-30s %s\n" "$name" "$reason"
     PASSED=$((PASSED + 1))
   else
-    printf "  \033[31mFAIL\033[0m  %-30s expected=%s got=%s\n" "$name" "$expected" "$actual"
+    printf "  \033[31mFAIL\033[0m  %-30s expected=%s got=%s%s\n" "$name" "$expected" "$actual" "$detail"
     FAILED=$((FAILED + 1))
   fi
 }
@@ -105,15 +158,14 @@ run_suite() {
   count=$(jq '.evals | length' "$evals_file")
 
   for ((i = 0; i < count; i++)); do
-    local name expected reason input
+    local name expected reason input env_json contains_json
     name=$(jq -r ".evals[$i].name" "$evals_file")
     expected=$(jq -r ".evals[$i].expected_decision" "$evals_file")
     reason=$(jq -r ".evals[$i].reason" "$evals_file")
-    input=$(jq -c ".evals[$i].input" "$evals_file" | sed "s|{{FIXTURES}}|$FIXTURES|g")
-
-    local env_json
-    env_json=$(jq -r ".evals[$i].env // empty" "$evals_file")
-    run_eval "$hook" "$name" "$input" "$expected" "$reason" "$env_json"
+    input=$(jq -c ".evals[$i].input" "$evals_file" | substitute)
+    env_json=$(jq -c ".evals[$i].env // empty" "$evals_file" | substitute)
+    contains_json=$(jq -c ".evals[$i].reason_contains // empty" "$evals_file" | substitute)
+    run_eval "$hook" "$name" "$input" "$expected" "$reason" "$env_json" "$contains_json"
   done
 
   rm -rf "$FIXTURES"
@@ -121,11 +173,11 @@ run_suite() {
 
 # ── Transport suite ──
 
-# Runs as a child process: the suite stubs portal-cli, and that stub must not
-# leak into the benchmarks below, which need the real one.
+# Runs as a child process: the suite puts a stub `claude` first on PATH, and
+# that stub must not leak into the benchmarks below, which need the real one.
 run_transport_suite() {
   echo ""
-  echo "Transport (scripts/lib/aika.sh, stubbed portal-cli)"
+  echo "Transport (scripts/lib/worker.sh and the scripts, stubbed claude)"
   echo "────────────────────────────────────────────────────────────────"
 
   local output counts p f
@@ -159,7 +211,6 @@ token_estimate() {
 run_benchmark_bulk_read() {
   local idx="$1"
   local question corpus
-
   question=$(jq -r ".benchmarks[$idx].question" "$BENCHMARKS")
   corpus=""
   local paths_args=()
@@ -223,10 +274,10 @@ run_benchmark_code_write() {
 }
 
 run_benchmarks() {
-  # shellcheck source=../scripts/lib/aika.sh
-  . "$PLUGIN_DIR/scripts/lib/aika.sh"
+  # shellcheck source=../scripts/lib/worker.sh
+  . "$PLUGIN_DIR/scripts/lib/worker.sh"
   if ! shunt_preflight; then
-    printf "\n\033[33mSkipping benchmarks: portal-cli or jq not available\033[0m\n"
+    printf "\n\033[33mSkipping benchmarks: the claude CLI is not available\033[0m\n"
     return
   fi
 
@@ -234,7 +285,7 @@ run_benchmarks() {
   count=$(jq '.benchmarks | length' "$BENCHMARKS")
 
   echo ""
-  echo "Token savings benchmark"
+  echo "Token savings benchmark (real worker calls on $SHUNT_WORKER_MODEL)"
   echo "────────────────────────────────────────────────────────────────────────────────"
 
   local total_without=0 total_with=0
@@ -298,7 +349,7 @@ run_benchmarks() {
     "Total" "" "$total_without" "$total_with" "$total_pct"
   echo ""
   printf "  \033[2mToken estimate: chars / 4. Output tokens weighted 5x (Opus pricing).\033[0m\n"
-  printf "  \033[2mBulk-read: without = file content in context, with = AiKA summary in context.\033[0m\n"
+  printf "  \033[2mBulk-read: without = file content in context, with = worker answer in context.\033[0m\n"
   printf "  \033[2mCode-write: without = read files + generate code, with = code written to disk.\033[0m\n"
 }
 

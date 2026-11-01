@@ -137,6 +137,73 @@
       "fixture": null,
       "expected_decision": "allow",
       "reason": "Parser bug: -n and 5 are separate args, 5 is treated as file path — file '5' won't exist so allow"
+    },
+    {
+      "id": 18,
+      "name": "cat-png-large",
+      "input": { "tool_input": { "command": "cat {{FIXTURES}}/screenshot.png" } },
+      "fixture": { "lines": 2000, "kind": "png" },
+      "expected_decision": "allow",
+      "reason": "Image: the text worker cannot help, pass through"
+    },
+    {
+      "id": 19,
+      "name": "cat-pdf-large",
+      "input": { "tool_input": { "command": "cat {{FIXTURES}}/report.pdf" } },
+      "fixture": { "lines": 2000, "kind": "pdf" },
+      "expected_decision": "allow",
+      "reason": "PDF: the text worker cannot help, pass through"
+    },
+    {
+      "id": 20,
+      "name": "head-binary",
+      "input": { "tool_input": { "command": "head {{FIXTURES}}/blob.bin" } },
+      "fixture": { "lines": 2000, "kind": "binary" },
+      "expected_decision": "allow",
+      "reason": "NUL bytes mean binary, pass through"
+    },
+    {
+      "id": 21,
+      "name": "shunt-disabled",
+      "input": { "tool_input": { "command": "cat {{FIXTURES}}/large.txt" } },
+      "fixture": { "lines": 800 },
+      "env": { "SHUNT_DISABLED": "1" },
+      "expected_decision": "allow",
+      "reason": "SHUNT_DISABLED=1 turns the hook off"
+    },
+    {
+      "id": 22,
+      "name": "worker-recursion-guard",
+      "input": { "tool_input": { "command": "cat {{FIXTURES}}/large.txt" } },
+      "fixture": { "lines": 800 },
+      "env": { "SHUNT_WORKER": "1" },
+      "expected_decision": "allow",
+      "reason": "Inside a shunt worker (SHUNT_WORKER=1) everything passes through"
+    },
+    {
+      "id": 23,
+      "name": "relative-path-uses-cwd",
+      "input": { "cwd": "{{FIXTURES}}", "tool_input": { "command": "cat large.txt" } },
+      "fixture": null,
+      "expected_decision": "block",
+      "reason": "Relative path resolves against the session cwd from the hook input"
+    },
+    {
+      "id": 24,
+      "name": "block-message-explains",
+      "input": { "tool_input": { "command": "cat {{FIXTURES}}/large.txt" } },
+      "fixture": { "lines": 800 },
+      "expected_decision": "block",
+      "reason_contains": ["\"{{PLUGIN_ROOT}}/scripts/bulk-read\" --question", "--paths \"{{FIXTURES}}/large.txt\"", "offset", "limit"],
+      "reason": "Block message names the bulk-read command and the targeted-Read way out"
+    },
+    {
+      "id": 25,
+      "name": "bulk-read-call-passes",
+      "input": { "tool_input": { "command": "\"/opt/shunt-root/scripts/bulk-read\" --question \"what is here?\" --paths {{FIXTURES}}/large.txt" } },
+      "fixture": null,
+      "expected_decision": "allow",
+      "reason": "The hook never blocks the bulk-read call it redirects to"
     }
   ]
 }
