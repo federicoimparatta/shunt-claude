@@ -1,8 +1,10 @@
 #!/bin/bash
-# Delegate boilerplate generation to AiKA code-writer mode
+# Delegate boilerplate generation to the local code-writer worker.
 # Usage: code-write --spec "write tests for UserService" --reference ref.test.ts --target out.test.ts
+#
+# Modified from spotify/portal-ai-plugins plugins/shunt (Apache-2.0).
 
-. "$(cd "$(dirname "$0")" && pwd)/lib/aika.sh"
+. "$(cd "$(dirname "$0")" && pwd)/lib/worker.sh"
 
 MODE_NAME="code-writer"
 
@@ -19,20 +21,26 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+shunt_guard || exit 1
+
 if [ -z "$spec" ]; then
   echo "Error: --spec is required" >&2
   exit 1
 fi
 
 # A bare spec would generate context-free code that matches nothing in the
-# project — fail loudly rather than write plausible-looking output.
+# project, so fail loudly rather than write plausible-looking output.
 if [ -z "$reference" ]; then
-  echo "Error: --reference is required — pass a file whose patterns the output should match." >&2
+  echo "Error: --reference is required. Pass a file whose patterns the output should match." >&2
   echo "For a follow-up, reference the file the previous call just generated." >&2
   exit 1
 fi
-if [ ! -f "$reference" ]; then
-  echo "Error: reference file not found: $reference" >&2
+if [ ! -f "$reference" ] || [ ! -r "$reference" ]; then
+  echo "Error: reference file not found or unreadable: $reference" >&2
+  exit 1
+fi
+if shunt_is_binary "$reference"; then
+  echo "Error: reference is not a text file: $reference" >&2
   exit 1
 fi
 
@@ -45,16 +53,16 @@ cat "$reference" >> "$message_file"
 
 shunt_invoke "$MODE_NAME" "$message_file" > "$answer_file" || exit 1
 
-# Strip markdown fences (model sometimes wraps despite instructions)
+# Strip markdown fences (the model sometimes wraps despite instructions)
 clean=$(sed '/^```/d' "$answer_file")
 
 # Write to target or stdout
 if [ -n "$target" ]; then
-  echo "$clean" > "$target"
+  printf '%s\n' "$clean" > "$target" || exit 1
   echo "Wrote $(wc -l < "$target" | tr -d ' ') lines to $target" >&2
 else
-  echo "$clean"
+  printf '%s\n' "$clean"
 fi
 
 # Token usage to stderr
-echo "[shunt: delegated to $MODE_NAME]" >&2
+echo "[shunt: delegated to $MODE_NAME ($SHUNT_WORKER_MODEL)]" >&2
