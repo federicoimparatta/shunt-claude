@@ -1,0 +1,23 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "shunt-claude",
+  "description": "Claude-only port of Spotify's shunt plugin for Claude Code.",
+  "owner": {
+    "name": "Federico Imparatta"
+  },
+  "plugins": [
+    {
+      "name": "shunt",
+      "description": "Shunts I/O-heavy work to a local Claude Haiku worker to save tokens. Hooks block full reads of large text files and redirect to bulk-read; code-write generates boilerplate from a spec and a reference file.",
+      "version": "0.1.0",
+      "author": {
+        "name": "Federico Imparatta"
+      },
+      "homepage": "https://github.com/federicoimparatta/shunt-claude",
+      "repository": "https://github.com/federicoimparatta/shunt-claude",
+      "license": "Apache-2.0",
+      "source": "./plugins/shunt",
+      "category": "developer-tools"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+shunt-claude
+Copyright 2026 Federico Imparatta
+
+This product is a modified version of the "shunt" Claude Code plugin from
+spotify/portal-ai-plugins (https://github.com/spotify/portal-ai-plugins,
+plugins/shunt, imported at commit aa252eb21df5bbf32b0beb45f84a2c03341ccad8).
+The original work is by Spotify and is licensed under the Apache License,
+Version 2.0. A copy of the license is in LICENSE.
+
+Modifications by Federico Imparatta, 2026:
+- The transport was replaced. Upstream's scripts/lib/aika.sh, which delegated
+  to Spotify Portal's AiKA through portal-cli, became scripts/lib/worker.sh,
+  which runs a local Claude Code worker (claude -p) instead.
+- The hooks, scripts, skills, evals and documentation were modified.
+- The plugin and marketplace manifests were rewritten.
+
+The first commit of this repository holds the upstream files verbatim, so
+every change is visible in its history.

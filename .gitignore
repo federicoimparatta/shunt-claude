@@ -1,0 +1,9 @@
+# Eval scratch fixtures
+plugins/shunt/evals/.fixtures/
+
+# Local coding-agent artifacts
+.claude/
+CLAUDE.local.md
+
+# macOS
+.DS_Store

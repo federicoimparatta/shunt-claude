@@ -1,19 +1,18 @@
 {
   "name": "shunt",
   "displayName": "Shunt",
-  "version": "0.2.0",
-  "description": "Shunts I/O-heavy work to AiKA modes to save tokens. Hooks block large file reads and redirect to bulk-reader/code-writer scripts backed by the Portal CLI.",
+  "version": "0.1.0",
+  "description": "Shunts I/O-heavy work to a local Claude Haiku worker to save tokens. Hooks block full reads of large text files and redirect to bulk-read; code-write generates boilerplate from a spec and a reference file. A Claude-only port of Spotify's shunt.",
   "author": {
-    "name": "Spotify"
+    "name": "Federico Imparatta"
   },
-  "homepage": "https://backstage.spotify.com/docs/portal",
-  "repository": "https://github.com/spotify/portal-ai-plugins",
+  "homepage": "https://github.com/federicoimparatta/shunt-claude",
+  "repository": "https://github.com/federicoimparatta/shunt-claude",
   "license": "Apache-2.0",
   "keywords": [
     "token-optimization",
     "model-routing",
     "delegation",
-    "aika"
-  ],
-  "skills": "./skills/"
+    "haiku"
+  ]
 }

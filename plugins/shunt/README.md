@@ -1,97 +1,85 @@
 # shunt
 
-A Claude Code plugin that shunts I/O-heavy work to AiKA modes, saving 82-94% of tokens on large file reads and boilerplate generation.
+A Claude Code plugin that shunts I/O-heavy work to a small, local Claude worker, so large file reads and boilerplate generation stop filling your main session's context.
+
+This is a Claude-only port of Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt). Upstream delegates to Spotify Portal's AiKA through `portal-cli`; this port delegates to `claude -p` on Claude Haiku 4.5 instead, so it needs nothing beyond Claude Code itself. See [What changed from upstream](#what-changed-from-upstream).
 
 ## How it works
 
 Three layers, from hard gate to soft suggestion:
 
-1. **Hooks** block Claude from reading large files and redirect to the bulk-reader skill
-2. **Scripts** handle the AiKA invocation and output cleanup
+1. **Hooks** block Claude from reading large text files whole and tell it how to call `bulk-read` instead
+2. **Scripts** run the worker and clean up its output
 3. **Skills** tell Claude when and how to call the scripts
 
-Claude never assembles bash pipelines from prose. It calls a script with named arguments. The scripts handle everything internally.
+Claude never assembles bash pipelines from prose. It calls a script with named arguments, and the script handles everything internally.
 
-Delegation goes through the Portal CLI actions registry — one `aika:invoke-chat` call per delegation — so the plugin works against any Portal instance with AiKA enabled. Modes are addressed by name and resolved server-side: case-insensitive, preferring your own mode, then your groups', then public ones; a name matching nothing or several modes equally fails with the candidate ids.
+The worker is one `claude -p` run per delegation, pinned to `claude-haiku-4-5-20251001`, with the prompt and the files on stdin. It runs from an empty temporary directory with no tools, no plugins, no hooks, no MCP servers, no CLAUDE.md, no auto memory and no skills, under a system prompt holding only the mode's instructions. Your session sees the worker's answer, never the files.
 
 ## Prerequisites
 
-- [`jq`](https://jqlang.org) — `brew install jq`
-- The **portal** plugin from this marketplace, which provides the Portal CLI that shunt delegates through:
+- [Claude Code](https://code.claude.com), installed and logged in. The worker runs as you, on your plan or API key, so delegations count toward your usage at Haiku rates.
+- [`jq`](https://jqlang.org) for the hooks (`brew install jq`). Without it the hooks stand down and let every read through.
+
+## Install
+
+From a shell:
 
 ```bash
-claude plugin install portal@portal
+claude plugin marketplace add federicoimparatta/shunt-claude
+claude plugin install shunt@shunt-claude --scope user
 ```
 
-Then, in a new session, set up and authenticate the CLI against your Portal instance:
-
-```text
-/portal:setup
-```
-
-Check whether the two AiKA modes (`bulk-reader` and `code-writer`) already exist on your instance — many instances ship them as public modes:
+Or in one step on Claude Code 2.1.275 or later:
 
 ```bash
-portal-cli actions aika:list-modes --json --input '{"search": "bulk-reader"}'
+claude plugin install shunt --marketplace federicoimparatta/shunt-claude
 ```
 
-If they exist, no mode creation is needed — just install the plugin and go. If not, or to create your own customized versions (e.g. different model or instructions):
+The repository is private, so the machine needs GitHub access to it (for example through `gh auth setup-git`). New sessions load the plugin; a running session needs `/reload-plugins` or a restart.
 
-```bash
-portal-cli actions aika:create-mode --input '{
-  "name": "bulk-reader",
-  "description": "Bulk file reader for code analysis",
-  "instructions": "You are a precise code analyst. Read the provided files and answer the question concisely. Output structured bullets only. No greetings, no prose, no preambles, no summaries. Lead every bullet with the exact name, type, or line number. Use nested bullets for details. Skip anything the caller did not ask for.",
-  "tags": ["coding", "delegation"],
-  "resource_limits": { "temperature": 0.2 }
-}'
+## Turn it off
 
-portal-cli actions aika:create-mode --input '{
-  "name": "code-writer",
-  "description": "Boilerplate code generator",
-  "instructions": "You generate code files based on a spec and reference files. Match the existing patterns, conventions, naming, and style exactly. Output only the code — no explanations, no markdown fences unless asked. If the spec is ambiguous, make reasonable choices that match the patterns in the reference code.",
-  "tags": ["coding", "delegation"],
-  "resource_limits": { "temperature": 0.2 }
-}'
-```
-
-A mode you create is private and owned by you, and name resolution prefers your own modes — so your customized `bulk-reader` automatically shadows the public one, no configuration needed.
+- For one session or one command: `SHUNT_DISABLED=1 claude`. The hooks then let everything through and the scripts refuse to delegate. You can also set it in the `env` block of a settings file.
+- For good: `claude plugin disable shunt@shunt-claude`, or `claude plugin uninstall shunt@shunt-claude`.
 
 ## Plugin structure
 
 ```
 shunt/
 ├── .claude-plugin/
-│   └── plugin.json          # Plugin manifest (name, description, version)
+│   └── plugin.json           # Plugin manifest (name, description, version)
 ├── hooks/
-│   ├── hooks.json           # Hook registration (PreToolUse matchers)
-│   ├── check-file-size      # Blocks Read on files > 350 lines
-│   └── check-bash-read      # Blocks cat/head/tail on large files
+│   ├── hooks.json            # Hook registration (PreToolUse matchers)
+│   ├── check-file-size       # Blocks full Read of text files > 350 lines
+│   └── check-bash-read       # Blocks cat/head/tail/less/more on them
 ├── scripts/
 │   ├── lib/
-│   │   └── aika.sh          # Shared aika:invoke-chat plumbing
-│   ├── bulk-read            # Invokes the bulk-reader mode
-│   └── code-write           # Invokes the code-writer mode
+│   │   └── worker.sh         # Shared claude -p worker plumbing
+│   ├── bulk-read             # Runs the bulk-reader worker
+│   └── code-write            # Runs the code-writer worker
 ├── skills/
 │   ├── bulk-reader/
-│   │   └── SKILL.md         # When/how to call bulk-read
+│   │   └── SKILL.md          # When/how to call bulk-read
 │   └── code-writer/
-│       └── SKILL.md         # When/how to call code-write
+│       └── SKILL.md          # When/how to call code-write
 └── evals/
-    ├── run.sh                # Runs hook + transport evals (51 tests)
-    ├── hook-evals.json       # Read hook test cases (17)
-    ├── bash-hook-evals.json  # Bash hook test cases (17)
-    ├── transport-evals.sh    # scripts/lib/aika.sh against a stubbed CLI (17)
+    ├── run.sh                # Runs hook + transport evals (106 checks)
+    ├── hook-evals.json       # Read hook test cases (26)
+    ├── bash-hook-evals.json  # Bash hook test cases (25)
+    ├── transport-evals.sh    # Worker and scripts against a stub claude (55)
     ├── evals.json            # End-to-end skill test cases (3)
     ├── benchmarks.json       # Token savings scenarios (4)
     └── fixtures/             # Test fixture files
 ```
 
+The marketplace manifest lives at the repository root, in `.claude-plugin/marketplace.json`.
+
 ## Scripts
 
 ### bulk-read
 
-Delegates file reading to AiKA. Files are wrapped in XML tags (`<file path="...">`) for clear boundaries.
+Delegates file reading to the worker. Files are wrapped in XML tags (`<file path="...">`) for clear boundaries, and their lines are numbered (like `cat -n`) so the line numbers the worker cites are exact and can feed a targeted Read.
 
 ```bash
 bulk-read --question "What does this service do?" --paths src/Service.java src/Handler.java
@@ -100,9 +88,11 @@ bulk-read --question "What does this service do?" --paths src/Service.java src/H
 bulk-read --question "Which methods call the database?" --paths src/Service.java src/Handler.java
 ```
 
+Text files only: images, PDFs and other binary files are refused, since the Read tool renders those natively.
+
 ### code-write
 
-Delegates boilerplate generation to AiKA. Strips markdown fences from output. Can write directly to disk via `--target`. `--reference` is required — without a file to match patterns against, the worker would generate context-free code that fits nothing in the project.
+Delegates boilerplate generation to the worker. Strips markdown fences from the output. Can write directly to disk via `--target`. `--reference` is required: without a file to match patterns against, the worker would generate context-free code that fits nothing in the project.
 
 ```bash
 # Generate and write to file
@@ -117,64 +107,97 @@ code-write --spec "Generate a config stub" --reference config/existing.yaml
 
 ### One shot per call
 
-`aika:invoke-chat` is ephemeral: nothing is stored server-side, and the action's own follow-up
-mechanism is for the caller to replay prior turns. Replaying a file corpus is the exact cost this
-plugin exists to avoid, so shunt does not do it — every call stands alone. Re-sending files is
-free where it matters, because the corpus goes to the worker model and never enters Claude's
-context.
+Each delegation is a fresh `claude -p` run with session persistence off: nothing is kept between calls. To ask a follow-up, send the files again. That is free where it matters, because the corpus goes to the worker and never enters the calling session's context.
 
 ## Hooks
 
+Both hooks follow the same output contract. To let a call through, they print nothing and exit 0, which leaves it to Claude Code's normal permission flow: shunt never approves anything. To block, they print a PreToolUse `permissionDecision: "deny"` whose reason gives Claude the exact `bulk-read` command, with the plugin's absolute path filled in, plus the targeted-Read alternative. They always exit 0, so a failure inside a hook can never block a tool call.
+
+Both hooks let everything through when `SHUNT_DISABLED=1` or `SHUNT_WORKER=1` is set, or when `jq` is missing.
+
 ### check-file-size (Read hook)
 
-Fires on every `Read` tool call. Blocks full-file reads on files exceeding `MIN_LINES` (default: 350, configurable via `SHUNT_MIN_LINES` env var). Allows through:
-- Targeted reads (offset or limit set)
-- Files under the threshold
-- Nonexistent files (let Read handle the error)
+Fires on every `Read` tool call. Blocks full-file reads of text files longer than `SHUNT_MIN_LINES` (default 350). Allows through:
+
+- Targeted reads (`offset` or `limit` set)
+- Files at or under the threshold
+- Nonexistent or unreadable files (let Read handle the error)
+- Images, PDFs and other binary files, detected by extension, by a `%PDF-` header, or by NUL bytes in the first 8 KiB
 
 ### check-bash-read (Bash hook)
 
-Fires on every `Bash` tool call. Catches `cat`, `head`, `tail`, `less`, `more` on large files. Allows through:
-- Piped commands (`cat file | grep`) — targeted reads
-- Redirections (`cat file > out`) — not reading into context
-- Commands with flags that indicate targeted reads
-- Non-read commands (`git status`, `grep`, etc.)
+Fires on every `Bash` tool call. Catches `cat`, `head`, `tail`, `less` and `more` on large text files. Relative paths resolve against the session's working directory from the hook input. Allows through:
+
+- Piped commands (`cat file | grep`): targeted reads
+- Redirections (`cat file > out`): not reading into context
+- Commands whose first argument after the flags is not an existing file
+- Non-read commands (`git status`, `grep`, and so on), including the `bulk-read` call itself
+- Images, PDFs and other binary files
+
+### Working with Edit
+
+Claude Code's Edit tool needs the file to have been read first. A blocked full Read does not count, but a targeted Read does: read the section you are about to change with `offset` and `limit`, then edit it. The block message says so, and line numbers from `bulk-read` tell Claude where to look.
 
 ## Configuration
 
-All settings are environment variables — add them to the `env` block in `.claude/settings.json`.
+All settings are environment variables. Set them in your shell before starting `claude`, or in the `env` block of a settings file.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SHUNT_MIN_LINES` | `350` | Line count above which the Read hook blocks and redirects |
-| `SHUNT_PORTAL_INSTANCE` | CLI default | Portal instance name or URL to invoke against |
-| `PORTAL_CLI_BIN` | `portal-cli`, else `npx` | Override how portal-cli is launched |
-| `SHUNT_MAX_PAYLOAD_BYTES` | `400000` (`120000` on Linux) | Request ceiling, since input travels through argv |
-| `SHUNT_TIMEOUT_SECONDS` | `180` | Timeout for one action invocation |
-| `SHUNT_BULK_READER_MODE_ID` | — | Pin a specific mode id if the name is ambiguous |
-| `SHUNT_CODE_WRITER_MODE_ID` | — | Pin a specific mode id if the name is ambiguous |
+| `SHUNT_MIN_LINES` | `350` | Line count above which the hooks block and redirect |
+| `SHUNT_WORKER_MODEL` | `claude-haiku-4-5-20251001` | Model the worker runs on |
+| `SHUNT_TIMEOUT_SECONDS` | `180` | Time limit for one worker run |
+| `SHUNT_MAX_PAYLOAD_BYTES` | `600000` | Largest request sent to the worker; sized for Haiku 4.5's 200K-token window |
+| `SHUNT_DISABLED` | unset | `1` turns shunt off: hooks pass everything, scripts refuse to delegate |
+
+`SHUNT_WORKER=1` is set by shunt on its own worker process. Do not set it yourself; it exists so a worker can never trigger shunt again.
+
+## Worker isolation
+
+`scripts/lib/worker.sh` runs the worker like this, with the prompt and files on stdin:
+
+```bash
+cd "$(mktemp -d)"
+SHUNT_WORKER=1 CLAUDE_CODE_DISABLE_CLAUDE_MDS=1 CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 \
+ENABLE_CLAUDEAI_MCP_SERVERS=false \
+timeout -k 10 "$SHUNT_TIMEOUT_SECONDS" \
+  claude -p --model "$SHUNT_WORKER_MODEL" --output-format text \
+    --system-prompt "<mode instructions>" \
+    --tools "" --disallowedTools "mcp__*" --strict-mcp-config \
+    --setting-sources user --safe-mode --disable-slash-commands \
+    --no-session-persistence < message
+```
+
+- `--tools ""` and `--disallowedTools "mcp__*"`: the worker cannot run anything, read anything or call any MCP tool, so it cannot trigger shunt's hooks either
+- `--safe-mode`: CLAUDE.md, skills, plugins, hooks, MCP servers and auto memory do not load, while login still works. `--bare` would also isolate the worker, but it accepts only an API key, so it would break subscription logins
+- `--setting-sources user` and the empty working directory: no project or local settings, `.mcp.json` or CLAUDE.md can apply
+- `--system-prompt`: the worker's whole system prompt is the mode's instructions, taken verbatim from upstream's `bulk-reader` and `code-writer` AiKA modes
+- `timeout`, or `gtimeout`, or a plain bash watchdog when neither is installed
 
 ## What doesn't get delegated
 
 The plugin is designed to know when NOT to delegate:
-- **Debugging** — requires Claude's reasoning, not a summary
-- **Editing** — Claude needs exact content in context; use targeted reads (offset/limit)
-- **Small files** — delegation overhead exceeds savings under 350 lines
-- **Architectural decisions** — judgment calls stay on Claude
+
+- **Debugging**: requires Claude's reasoning, not a summary
+- **Editing**: Claude needs exact content in context; use targeted reads (offset/limit)
+- **Small files**: delegation overhead exceeds savings under 350 lines
+- **Architectural decisions**: judgment calls stay on Claude
 
 ## Evals
 
 ```bash
-# Hook routing + transport plumbing — needs no Portal access
+# Hook routing + worker transport against a stub claude: no model calls
 bash evals/run.sh
 
-# Also re-measure token savings against the real modes — needs portal-cli auth
+# Also measure token savings with real worker calls (uses your Claude usage)
 bash evals/run.sh --benchmark
 ```
 
+The transport suite never calls a model: it puts a stub `claude` first on `PATH` that records its argv, stdin, working directory and environment. Besides upstream's hook cases, the suites check that the corpus travels on stdin (a request over 1 MB goes through without `E2BIG`), every isolation flag is passed, `SHUNT_WORKER=1` and `SHUNT_DISABLED=1` stop both hooks and scripts, images and PDFs pass the hooks untouched, `code-write` refuses to run without `--reference`, and a hung worker is cut off with and without `timeout(1)`.
+
 ## Benchmarks
 
-Tested against a 162K-line Java monorepo:
+Upstream measured these against AiKA on a 162K-line Java monorepo. They have not been re-measured against the Haiku worker; run `bash evals/run.sh --benchmark` for numbers on this transport.
 
 | Scenario | Lines | Without shunt | With shunt | Savings |
 |----------|-------|--------------|------------|---------|
@@ -183,10 +206,23 @@ Tested against a 162K-line Java monorepo:
 | Multi-file cross-service | 1,281 | 16,221 tokens | 821 tokens | 94% |
 | Code-write | 3,667 | 40,614 tokens + generation | 833 lines to disk | - |
 
-Mean bulk-read savings: **90%**
-
 ## Known limitations
 
-- **No enforcement for code-writer** — only bulk-reader has hook enforcement. Code-writer relies on Claude recognizing when to use it via the skill description.
-- **Request size** — `aika:invoke-chat` input is passed on the command line, so a request must fit in `ARG_MAX` (1 MB on macOS, shared with the environment; Linux additionally caps a single argument at 128 KiB). shunt refuses anything over `SHUNT_MAX_PAYLOAD_BYTES` with a clear error rather than failing with `E2BIG`. Split into smaller batches.
-- **Invocation timeout** — shunt caps one action invocation at `SHUNT_TIMEOUT_SECONDS` (default 180). Very large generations can exceed it; raise the timeout or split the spec into smaller calls.
+- **No enforcement for code-writer**: only bulk-reader has hook enforcement. Code-writer relies on Claude recognizing when to use it via the skill description.
+- **Request size**: a request must fit the worker model's context window. shunt refuses anything over `SHUNT_MAX_PAYLOAD_BYTES` with a clear error; split the work into smaller batches, or raise the limit for a model with a larger window. Claude Code caps piped stdin at 10 MB.
+- **Invocation timeout**: one worker run is capped at `SHUNT_TIMEOUT_SECONDS` (default 180). Very large generations can exceed it; raise the timeout or split the spec into smaller calls.
+- **No sampling control**: upstream's AiKA modes ran at temperature 0.2. `claude -p` does not expose temperature, so the worker runs at the model's default.
+- **Startup cost**: each delegation starts a fresh `claude -p`, which adds a few seconds before the model answers.
+- **Global effect**: installed at user scope, the hooks apply to every session, subagents and unattended `claude -p` jobs included. Set `SHUNT_DISABLED=1` for jobs that must keep reading files whole.
+
+## What changed from upstream
+
+- **Transport**: `scripts/lib/aika.sh` (Portal CLI, `aika:invoke-chat`) became `scripts/lib/worker.sh` (local `claude -p`). The request goes on stdin instead of argv, which removes upstream's `ARG_MAX` ceiling. AiKA mode resolution, mode-id pinning and the Portal variables (`SHUNT_PORTAL_INSTANCE`, `PORTAL_CLI_BIN`, `SHUNT_*_MODE_ID`) are gone; `SHUNT_WORKER_MODEL` and `SHUNT_DISABLED` are new.
+- **Hooks**: same logic and thresholds, with these changes. Pass-through prints nothing instead of `{"decision": "allow"}`, which Claude Code's PreToolUse schema does not define, and a block uses the current `hookSpecificOutput.permissionDecision: "deny"` format. Images, PDFs and binary files always pass. `SHUNT_DISABLED=1` and `SHUNT_WORKER=1` pass everything. The block message carries the exact `bulk-read` command. The Bash hook resolves relative paths against the session cwd.
+- **Scripts**: `bulk-read` numbers lines and refuses binary files; both scripts refuse to run under `SHUNT_DISABLED=1` or `SHUNT_WORKER=1`.
+- **Skills and docs**: rewritten for the local worker.
+- **Evals**: upstream's 34 hook cases are unchanged and pass; 17 hook cases were added, and the transport suite was rewritten against a stub `claude`.
+
+## License
+
+Apache-2.0. Original work by Spotify; see [`NOTICE`](../../NOTICE) at the repository root.
