@@ -1,40 +1,80 @@
 #!/bin/bash
-# Block Bash commands that read large files, redirect to /bulk-reader skill
-# Catches cat/head/tail/less/more that bypass the Read hook
+# PreToolUse hook for Bash: block cat/head/tail/less/more of large text files,
+# which would otherwise bypass the Read hook, and redirect Claude to bulk-read.
+#
+# Modified from spotify/portal-ai-plugins plugins/shunt (Apache-2.0).
+#
+# Output contract. To let a call through, print nothing and exit 0: the call
+# then goes through Claude Code's normal permission flow, untouched. To block,
+# print one PreToolUse JSON object with permissionDecision "deny". The hook
+# always exits 0, so a failure in here can never block a command.
+
+on() { case "$1" in 1|true|TRUE|yes|YES) return 0 ;; *) return 1 ;; esac; }
+
+# Kill switch, and recursion guard for the worker process.
+on "${SHUNT_DISABLED:-}" && exit 0
+on "${SHUNT_WORKER:-}" && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 
 MIN_LINES="${SHUNT_MIN_LINES:-350}"
 case "$MIN_LINES" in ''|*[!0-9]*) MIN_LINES=350 ;; esac
 
 input=$(cat)
 
-command=$(echo "$input" | jq -r '.tool_input.command // empty')
-[ -z "$command" ] && { echo '{"decision": "allow"}'; exit 0; }
+command=$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)
+[ -z "$command" ] && exit 0
 
-# Skip piped commands (cat file | grep) — those are targeted reads
-echo "$command" | grep -qE '\|' && { echo '{"decision": "allow"}'; exit 0; }
+# Skip piped commands (cat file | grep): those are targeted reads
+printf '%s\n' "$command" | grep -qE '\|' && exit 0
 
-# Skip redirections (cat file > out) — not a read-into-context operation
-echo "$command" | grep -qE '>' && { echo '{"decision": "allow"}'; exit 0; }
+# Skip redirections (cat file > out): not a read-into-context operation
+printf '%s\n' "$command" | grep -qE '>' && exit 0
 
 # Extract file path from read commands, stripping flags (e.g. cat -n, head -100)
 file_path=""
-if echo "$command" | grep -qE '^(cat|head|tail|less|more) '; then
+if printf '%s\n' "$command" | grep -qE '^(cat|head|tail|less|more) '; then
   # Remove the command name, then strip any flags (-n, -100, --number, etc.)
-  args=$(echo "$command" | sed -E 's/^(cat|head|tail|less|more) +//')
+  args=$(printf '%s\n' "$command" | sed -E 's/^(cat|head|tail|less|more) +//')
   for arg in $args; do
     case "$arg" in
       -*) continue ;;
-      *)  file_path=$(echo "$arg" | tr -d '"'"'"); break ;;
+      *)  file_path=$(printf '%s' "$arg" | tr -d '"'"'"); break ;;
     esac
   done
 fi
 
-[ -z "$file_path" ] && { echo '{"decision": "allow"}'; exit 0; }
-[ ! -f "$file_path" ] && { echo '{"decision": "allow"}'; exit 0; }
+[ -z "$file_path" ] && exit 0
 
-lines=$(wc -l < "$file_path" 2>/dev/null | tr -d ' ' || echo "0")
-if [ "$lines" -gt "$MIN_LINES" ]; then
-  echo "{\"decision\": \"block\", \"reason\": \"File is ${lines} lines (threshold: ${MIN_LINES}). Use the /bulk-reader skill to delegate this read to AiKA instead of cat/head/tail.\"}"
-else
-  echo '{"decision": "allow"}'
-fi
+# A relative path is relative to the session's working directory, which the
+# hook input carries; the hook process itself may run elsewhere
+case "$file_path" in
+  /*) ;;
+  *)
+    cwd=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)
+    [ -n "$cwd" ] && file_path="$cwd/$file_path"
+    ;;
+esac
+
+[ ! -f "$file_path" ] && exit 0
+[ ! -r "$file_path" ] && exit 0
+
+# Allow images, PDFs and other binary files: the worker only handles text
+lower=$(printf '%s' "$file_path" | tr '[:upper:]' '[:lower:]')
+case "$lower" in
+  *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.ico|*.tif|*.tiff|*.heic|*.heif|*.avif|*.pdf) exit 0 ;;
+esac
+[ "$(head -c 5 "$file_path" 2>/dev/null)" = "%PDF-" ] && exit 0
+sample_bytes=$(head -c 8192 "$file_path" 2>/dev/null | wc -c | tr -d ' ')
+text_bytes=$(head -c 8192 "$file_path" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')
+[ "$sample_bytes" != "$text_bytes" ] && exit 0
+
+lines=$(wc -l < "$file_path" 2>/dev/null | tr -d ' ')
+case "$lines" in ''|*[!0-9]*) exit 0 ;; esac
+[ "$lines" -le "$MIN_LINES" ] && exit 0
+
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+reason="File is ${lines} lines (threshold: ${MIN_LINES}), so shunt blocked this cat/head/tail read. To answer a question about the file, delegate the read to a local worker model instead: \"${root}/scripts/bulk-read\" --question \"<your question>\" --paths \"${file_path}\" (list more paths for a cross-file question). If you need exact content to edit, use the Read tool with offset and limit for just the section you need."
+
+jq -cn --arg reason "$reason" \
+  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+exit 0

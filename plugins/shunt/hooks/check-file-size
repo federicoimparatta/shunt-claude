@@ -1,33 +1,62 @@
 #!/bin/bash
-# Block full-file reads on large files, redirect to /bulk-reader skill
-# Self-contained: all routing logic lives here, no CLAUDE.md needed
+# PreToolUse hook for Read: block full reads of large text files and redirect
+# Claude to bulk-read, or to a targeted Read when it needs exact content.
+# Self-contained: all routing logic lives here, no CLAUDE.md needed.
+#
+# Modified from spotify/portal-ai-plugins plugins/shunt (Apache-2.0).
+#
+# Output contract. To let a call through, print nothing and exit 0: the call
+# then goes through Claude Code's normal permission flow, untouched. To block,
+# print one PreToolUse JSON object with permissionDecision "deny". The hook
+# always exits 0, so a failure in here can never block a read.
+
+on() { case "$1" in 1|true|TRUE|yes|YES) return 0 ;; *) return 1 ;; esac; }
+
+# Kill switch, and recursion guard for the worker process.
+on "${SHUNT_DISABLED:-}" && exit 0
+on "${SHUNT_WORKER:-}" && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
 
 MIN_LINES="${SHUNT_MIN_LINES:-350}"
 case "$MIN_LINES" in ''|*[!0-9]*) MIN_LINES=350 ;; esac
 
 input=$(cat)
 
-file_path=$(echo "$input" | jq -r '.tool_input.file_path // empty')
-offset=$(echo "$input" | jq -r '.tool_input.offset // empty')
-limit=$(echo "$input" | jq -r '.tool_input.limit // empty')
+file_path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)
+offset=$(printf '%s' "$input" | jq -r '.tool_input.offset // empty' 2>/dev/null)
+limit=$(printf '%s' "$input" | jq -r '.tool_input.limit // empty' 2>/dev/null)
 
-# Allow targeted reads (offset or limit set) — Claude already knows what it needs
+# Allow targeted reads (offset or limit set): Claude already knows what it needs
 if [ -n "$offset" ] || [ -n "$limit" ]; then
-  echo '{"decision": "allow"}'
   exit 0
 fi
 
-# Allow if file doesn't exist or path is empty
-if [ -z "$file_path" ] || [ ! -f "$file_path" ]; then
-  echo '{"decision": "allow"}'
+# Allow if the file doesn't exist or the path is empty: let Read report it
+if [ -z "$file_path" ] || [ ! -f "$file_path" ] || [ ! -r "$file_path" ]; then
   exit 0
 fi
 
-# Allow small files — delegation overhead isn't worth it
-lines=$(wc -l < "$file_path" 2>/dev/null | tr -d ' ' || echo "0")
+# Allow images, PDFs and other binary files: Read renders them natively, and
+# the worker only handles text
+lower=$(printf '%s' "$file_path" | tr '[:upper:]' '[:lower:]')
+case "$lower" in
+  *.png|*.jpg|*.jpeg|*.gif|*.webp|*.bmp|*.ico|*.tif|*.tiff|*.heic|*.heif|*.avif|*.pdf) exit 0 ;;
+esac
+[ "$(head -c 5 "$file_path" 2>/dev/null)" = "%PDF-" ] && exit 0
+sample_bytes=$(head -c 8192 "$file_path" 2>/dev/null | wc -c | tr -d ' ')
+text_bytes=$(head -c 8192 "$file_path" 2>/dev/null | LC_ALL=C tr -d '\000' | wc -c | tr -d ' ')
+[ "$sample_bytes" != "$text_bytes" ] && exit 0
+
+# Allow small files: delegation overhead isn't worth it
+lines=$(wc -l < "$file_path" 2>/dev/null | tr -d ' ')
+case "$lines" in ''|*[!0-9]*) exit 0 ;; esac
 if [ "$lines" -le "$MIN_LINES" ]; then
-  echo '{"decision": "allow"}'
   exit 0
 fi
 
-echo "{\"decision\": \"block\", \"reason\": \"File is ${lines} lines (threshold: ${MIN_LINES}). Use the /bulk-reader skill to delegate this read to AiKA instead of reading it directly. If you need exact content for editing, re-read with an offset/limit for just the section you need.\"}"
+root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+reason="File is ${lines} lines (threshold: ${MIN_LINES}), so shunt blocked this full read. To answer a question about the file, delegate the read to a local worker model with the Bash tool: \"${root}/scripts/bulk-read\" --question \"<your question>\" --paths \"${file_path}\" (list more paths for a cross-file question). If you need exact content to edit, Read the file again with offset and limit for just the section you need, for example offset 1 and limit 200."
+
+jq -cn --arg reason "$reason" \
+  '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $reason}}'
+exit 0
