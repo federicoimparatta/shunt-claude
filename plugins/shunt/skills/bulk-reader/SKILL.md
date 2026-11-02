@@ -7,7 +7,7 @@ description: "Delegate bulk reading of text files to a local Claude Haiku worker
 "${CLAUDE_PLUGIN_ROOT}/scripts/bulk-read" --question "<question>" --paths <file1> [<file2> ...]
 ```
 
-The worker is `claude -p` on Claude Haiku 4.5 with no tools: it sees only the files you pass
+The worker is `claude -p` on the latest Claude Haiku with no tools: it sees only the files you pass
 and your question, and you see only its answer. Each call is independent. To ask a follow-up,
 ask again with the same `--paths`; re-sending the files costs you nothing.
 

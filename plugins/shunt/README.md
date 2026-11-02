@@ -2,7 +2,7 @@
 
 A Claude Code plugin that shunts I/O-heavy work to a small, local Claude worker, so large file reads and boilerplate generation stop filling your main session's context.
 
-This is a Claude-only port of Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt). Upstream delegates to Spotify Portal's AiKA through `portal-cli`; this port delegates to `claude -p` on Claude Haiku 4.5 instead, so it needs nothing beyond Claude Code itself. See [What changed from upstream](#what-changed-from-upstream).
+This is a Claude-only port of Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt). Upstream delegates to Spotify Portal's AiKA through `portal-cli`; this port delegates to `claude -p` on the latest Claude Haiku instead, so it needs nothing beyond Claude Code itself. See [What changed from upstream](#what-changed-from-upstream).
 
 ## How it works
 
@@ -14,7 +14,7 @@ Three layers, from hard gate to soft suggestion:
 
 Claude never assembles bash pipelines from prose. It calls a script with named arguments, and the script handles everything internally.
 
-The worker is one `claude -p` run per delegation, pinned to `claude-haiku-4-5-20251001`, with the prompt and the files on stdin. It runs from an empty temporary directory with no tools, no plugins, no hooks, no MCP servers, no CLAUDE.md, no auto memory and no skills, under a system prompt holding only the mode's instructions. Your session sees the worker's answer, never the files.
+The worker is one `claude -p` run per delegation, on the `haiku` alias (the latest Haiku model), with the prompt and the files on stdin. It runs from an empty temporary directory with no tools, no plugins, no hooks, no MCP servers, no CLAUDE.md, no auto memory and no skills, under a system prompt holding only the mode's instructions. Your session sees the worker's answer, never the files.
 
 ## Prerequisites
 
@@ -145,9 +145,9 @@ All settings are environment variables. Set them in your shell before starting `
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `SHUNT_MIN_LINES` | `350` | Line count above which the hooks block and redirect |
-| `SHUNT_WORKER_MODEL` | `claude-haiku-4-5-20251001` | Model the worker runs on |
+| `SHUNT_WORKER_MODEL` | `haiku` | Model the worker runs on; the alias tracks the latest Haiku, a full ID pins one |
 | `SHUNT_TIMEOUT_SECONDS` | `180` | Time limit for one worker run |
-| `SHUNT_MAX_PAYLOAD_BYTES` | `600000` | Largest request sent to the worker; sized for Haiku 4.5's 200K-token window |
+| `SHUNT_MAX_PAYLOAD_BYTES` | `600000` | Largest request sent to the worker; sized for a 200K-token window |
 | `SHUNT_DISABLED` | unset | `1` turns shunt off: hooks pass everything, scripts refuse to delegate |
 
 `SHUNT_WORKER=1` is set by shunt on its own worker process. Do not set it yourself; it exists so a worker can never trigger shunt again.

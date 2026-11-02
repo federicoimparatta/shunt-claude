@@ -18,14 +18,18 @@
 #
 # Written for the bash 3.2 that macOS ships as /bin/bash.
 
-SHUNT_WORKER_MODEL="${SHUNT_WORKER_MODEL:-claude-haiku-4-5-20251001}"
+# "haiku" is the Claude Code alias for the latest Haiku model, so the worker
+# moves to each new Haiku release without a change here. Pin a full model ID
+# through SHUNT_WORKER_MODEL when a run must be reproducible.
+SHUNT_WORKER_MODEL="${SHUNT_WORKER_MODEL:-haiku}"
 
 # Ceiling for one worker run; large generations can take a while.
 SHUNT_TIMEOUT_SECONDS="${SHUNT_TIMEOUT_SECONDS:-180}"
 case "$SHUNT_TIMEOUT_SECONDS" in ''|*[!0-9]*|0) SHUNT_TIMEOUT_SECONDS=180 ;; esac
 
-# Haiku 4.5 has a 200K-token context window. About 600 KB of code or prose
-# fits with room left for the system prompt and the answer. Raise this when
+# Sized for a 200K-token context window, the smallest any Haiku model has
+# shipped with. About 600 KB of code or prose fits with room left for the
+# system prompt and the answer. Raise this when
 # SHUNT_WORKER_MODEL names a model with a larger window; Claude Code itself
 # caps piped stdin at 10 MB.
 SHUNT_MAX_PAYLOAD_BYTES="${SHUNT_MAX_PAYLOAD_BYTES:-600000}"

@@ -2,7 +2,7 @@
 
 A Claude-only port of Spotify's [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt) plugin for Claude Code.
 
-shunt keeps large file reads and boilerplate generation out of your main session's context. Hooks block full reads of text files over 350 lines and point Claude at `bulk-read`, which hands the files and a question to a local `claude -p` worker on Claude Haiku 4.5 and returns only the answer. `code-write` generates boilerplate from a spec and a reference file straight to disk. Upstream delegates to Spotify Portal's AiKA; this port needs nothing beyond Claude Code.
+shunt keeps large file reads and boilerplate generation out of your main session's context. Hooks block full reads of text files over 350 lines and point Claude at `bulk-read`, which hands the files and a question to a local `claude -p` worker on the latest Claude Haiku and returns only the answer. `code-write` generates boilerplate from a spec and a reference file straight to disk. Upstream delegates to Spotify Portal's AiKA; this port needs nothing beyond Claude Code.
 
 ## Install
 
