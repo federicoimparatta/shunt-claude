@@ -113,7 +113,7 @@ check_yes "question-via-stdin" "the question travels on stdin" \
 check "nothing-in-argv" "0" "$(grep -cE 'marker-alpha|what is alpha' "$STUB_RECORD_DIR/argv")" \
   "neither corpus nor question is on the command line"
 check "print-mode" "yes" "$(has_arg -p)" "worker runs claude -p"
-check "model-pinned" "claude-haiku-4-5-20251001" "$(arg_after --model)" "default worker model is Haiku 4.5"
+check "model-alias" "haiku" "$(arg_after --model)" "default worker model is the haiku alias (latest Haiku)"
 check "text-output" "text" "$(arg_after --output-format)" "plain text output"
 check "no-builtin-tools" "" "$(arg_after --tools)" "--tools \"\" disables every built-in tool"
 check "no-mcp-tools" "mcp__*" "$(arg_after --disallowedTools)" "MCP tools denied too"
