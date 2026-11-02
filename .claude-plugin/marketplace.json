@@ -9,7 +9,7 @@
     {
       "name": "shunt",
       "description": "Shunts I/O-heavy work to a local Claude Haiku worker to save tokens. Hooks block full reads of large text files and redirect to bulk-read; code-write generates boilerplate from a spec and a reference file.",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "author": {
         "name": "Federico Imparatta"
       },
